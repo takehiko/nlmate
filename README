@@ -1,0 +1,40 @@
+[Tutorial]
+"nlmate" is a game for you to solve the nested loop mating problem,
+just like the Shogi mating problem (a.k.a. Tsume-Shogi).
+
+Your task is typing in two "for statements" which work as
+the nested loop to conform to the goal sequence. After the entry,
+the fixed codes surround and enclose your instructions and the
+source file is automatically compiled to decide if the output is
+the same as the goal.
+
+The input which begins with the word other than "for" is not
+allowed, except that you may "quit" to stop playing the game.
+
+All you have to do for the first task is punch in
+"for (i = 0; i <= 2; i++)"
+and
+"for (j = 0; j <= 2; j++)"
+respectively before hitting Enter key.
+
+[Level 1]
+Goal: (0,0),(0,1),(0,2),(1,0),(1,1),(1,2),(2,0),(2,1),(2,2),
+Outer loop: for (i = 0; i <= 2; i++)
+Inner loop:   for (j = 0; j <= 2; j++)
+========================================
+#include <stdio.h>
+
+int main(void)
+{
+  int i = 123, j = 456;
+
+  for (i = 0; i <= 2; i++)
+    for (j = 0; j <= 2; j++)
+      printf("(%d,%d),", i, j);
+
+  return 0;
+}
+========================================
+Output: (0,0),(0,1),(0,2),(1,0),(1,1),(1,2),(2,0),(2,1),(2,2),
+Goal:   (0,0),(0,1),(0,2),(1,0),(1,1),(1,2),(2,0),(2,1),(2,2),
+Correct!
