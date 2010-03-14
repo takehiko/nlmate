@@ -1,0 +1,361 @@
+#!/usr/bin/env ruby
+# -*- coding: utf-8 -*-
+
+require "optparse"
+require "readline"
+require "fileutils"
+require "open3"
+require "timeout"
+
+Version = "0.0.1"
+
+class Nlmate
+  #### constructor ####
+  def initialize(h)
+    @variation = h[:variation] || rand(1024)
+    @offset_i = @offset_j = 0
+    @swap_ij = true
+    @use_smaller = false
+    @question_array = []
+    @workdir = h[:workdir] || File.expand_path("~/.nlmate")
+    @level_from = h[:from] || 1
+    @level_to = h[:to] || -1
+    @level = -1
+    @goal = nil
+    @line1 = @line2 = ""
+    @compile_error = false
+    @result = ""
+    @result_byte_max = 100
+
+    create_dir
+    setup_variation
+    setup_question
+  end
+
+  #### public methods ####
+  def start
+    print_question  if $DEBUG
+
+    @level_to = @question_array.size  if @level_to == -1
+    if @level_from <= 0 || @level_from > @question_array.size ||
+        @level_to <= 0 || @level_to > @question_array.size
+      puts "Invalid level."
+      return
+    end
+
+    @level_from.upto(@level_to) do |lv|
+      @level = lv
+      play_game
+    end
+  end
+
+  #### private mathods ####
+  private
+
+  def create_dir(lv = nil)
+    unless test(?d, @workdir)
+      FileUtils.mkdir(@workdir)
+    end
+    if lv
+      @dir_level = "#{@workdir}/#{lv}"
+      if test(?d, @dir_level)
+        FileUtils.rm_r(@dir_level)
+      end
+      FileUtils.mkdir(@dir_level)
+    end
+  end
+
+  def setup_variation
+    variation1, variation2 = @variation.divmod(128)
+    @swap_ij = (variation1 == 7)
+    @offset_i = @offset_j = 0
+    if variation2 == 127
+      @offset_i = 1
+      @offset_j = 0
+    elsif variation2 == 126
+      @offset_i = 0
+      @offset_j = 1
+    elsif variation2 >= 100
+      @offset_i = 1
+      @offset_j = 1
+    end
+  end
+
+  def setup_question
+    q0 = [
+          ["000102101112202122"],
+          ["001011202122",
+           "000102111222"],
+          ["000102101120",
+           "021112202122"],
+          ["000111122223",
+           "010210112/20"],
+          ["000111122021",
+           "010210112122"],
+          ["0001111222",
+           "0102101120"],
+          ["00022022"],
+          ["0002112022",
+           "01101221"],
+          ["000102121110202122"]
+         ]
+    q1 = q0.map {|q_a|
+      q_a.map {|line|
+        line.split(//u).map {|c|
+          c.ord - '0'.ord
+        }
+      }
+    }
+
+    @question_array = q1.map {|q_a|
+      q_a.map {|array|
+        array2 = array.dup
+        array3 = []
+        while array2.size >= 2
+          v1, v2 = array2.shift(2)
+          v1, v2 = v2, v1  if @swap_ij
+          v1 += @offset_i
+          v2 += @offset_j
+          array3 << [v1, v2]
+        end
+        array3
+      }
+    }
+  end
+
+  def goal_to_str(array)
+    array.map {|i, j| "(#{i},#{j})"}.join(",") + ","
+  end
+
+  def print_question
+    require "pp"
+    PP.pp @question_array
+    PP.pp @question_array.map {|q_a|
+      q_a.map {|array|
+        goal_to_str(array)
+      }
+    }
+  end
+
+  def print_tutorial
+    line1_tutorial = "for (i = #{@question_array[0][0][0][0]}; i <= #{@question_array[0][0][-1][0]}; i++)"
+    line2_tutorial = "for (j = #{@question_array[0][0][0][1]}; j <= #{@question_array[0][0][-1][1]}; j++)"
+    if @swap_ij
+      line1_tutorial.gsub!(/i/, "j")
+      line2_tutorial.gsub!(/j/, "i")
+    end
+    if @use_smaller
+      line1_tutorial.sub!(/<= (\d)/) {"< #{$1.to_i + 1}"}
+      line2_tutorial.sub!(/<= (\d)/) {"< #{$1.to_i + 1}"}
+    end
+    puts <<EOS
+[Tutorial]
+"nlmate" is a game for you to solve the nested loop mating problem,
+just like the Shogi mating problem (a.k.a. Tsume-Shogi).
+
+Your task is typing in two "for statements" which work as 
+the nested loop to conform to the goal sequence. After the entry, 
+the fixed codes surround and enclose your instructions and the 
+source file is automatically compiled to decide if the output is 
+the same as the goal.
+
+The input which begins with the word other than "for" is not 
+allowed, except that you may "quit" to stop playing the game.
+
+All you have to do for the first task is punch in
+"#{line1_tutorial}"
+and
+"#{line2_tutorial}"
+respectively before hitting Enter key.
+
+EOS
+    Readline::HISTORY << line1_tutorial
+    Readline::HISTORY << line2_tutorial
+  end
+
+  def give_question
+    puts "[Level #{@level}]"
+    if @goal.nil?
+      q1 = @question_array[@level - 1]
+      if q1.size == 1
+        q2 = q1.first
+      else
+        q2 = q1[rand(q1.size)]
+      end
+      @goal = goal_to_str(q2)
+      @result_byte_max = [@goal.size * 2, 100].max
+    end
+    puts "Goal: #{@goal}"
+  end
+
+  def get_line(prompt)
+    loop do
+      line = Readline.readline(prompt, true)
+      case line
+      when /^\s*quit/i
+        exit_game("Aborted.")
+      when /^\s*for/
+        return line
+      else
+        puts "Invalid statement."
+      end
+    end
+  end
+
+  def exit_game(message)
+    puts message
+    exit
+  end
+
+  def get_lines
+    @line1 = get_line("Outer loop: ")
+    @line2 = get_line("Inner loop:   ")
+  end
+
+  def print_hairline
+    puts("=" * 40)
+  end
+
+  def compile_and_execute
+    @compile_error = false
+    @result = ""
+
+    create_dir(@level)
+    Dir.chdir(@dir_level) do
+      open("answer.c", "w") do |f_out|
+        src = <<EOS
+#include <stdio.h>
+
+int main(void)
+{
+  int i = 123, j = 456;
+
+  #{@line1}
+    #{@line2}
+      printf("(%d,%d),", i, j);
+
+  return 0;
+}
+EOS
+        f_out.print src
+        print_hairline
+        print src
+        print_hairline
+      end
+
+      message_out = ""
+      message_err = ""
+      Open3.popen3("cc -o answer answer.c") do |stdin, stdout, stderr|
+        stdin.close
+        message_out = stdout.read
+        message_err = stderr.read
+      end
+      if !message_err.empty?
+        puts message_err
+        open("compile_stderr", "w") do |f_err|
+          f_err.print message_err
+          print_hairline
+        end
+      end
+      unless test(?f, "answer")
+        @compile_error = true
+        return
+      end
+
+      @result = ""
+      flag_timeout = false
+      Open3.popen3("./answer") do |stdin, stdout, stderr|
+        begin
+          timeout(5) do
+            stdin.close
+            @result = stdout.read(@result_byte_max) || ""
+          end
+        rescue Timeout::Error
+          stdout.flush
+          @result = stdout.read(@result_byte_max) || ""
+          flag_timeout = true
+        end
+      end
+      @result.chomp!
+      if @result.empty?
+        @result = "(no output)"
+      elsif @result.size >= @result_byte_max
+        @result = @result[0, @result_byte_max] + " ..."
+      end
+      if flag_timeout
+        @result += " (time out)"
+      end
+    end
+  end
+
+  def correct_answer?
+    if @compile_error
+      puts "Compile error occurred.... Let's start fresh!"
+      puts
+      return false
+    end
+
+    puts "Output: #{@result}"
+    puts "Goal:   #{@goal}"
+
+    if @result != @goal
+      puts "Wrong.... Try again!"
+      puts
+      return false
+    end
+
+    puts "Correct!"
+    puts
+    true
+  end
+
+  def play_game
+    @goal = nil
+    print_tutorial  if @level == 1
+    loop do
+      give_question
+      get_lines
+      compile_and_execute
+      break  if correct_answer?
+    end
+  end
+end
+
+unless String.instance_methods.include?(:ord)
+  class String
+    def ord
+      self[0]
+    end
+  end
+end
+
+if __FILE__ == $0
+  h = {}
+  opt = OptionParser.new
+  opt.on("-0", "--tutorial", "Tutorial mode (Level 1 only)") {
+    h[:random] = 0
+    h[:from] = h[:to] = 1
+  }
+  opt.on("-b", "--beginner", "Beginner mode (up to Level 3)") {
+    h[:from] = 1
+    h[:to] = 3
+  }
+  opt.on("-d VAL", "--dir=VAL", "Working directory") {|v|
+    h[:workdir] = v
+  }
+  opt.on("-v VAL", "--var=VAL", "Value for variation") {|v|
+    h[:variation] = v.to_i
+  }
+  opt.on("-l VAL", "--level=VAL", "Fixed level") {|v|
+    h[:from] = h[:to] = v.to_i
+  }
+  opt.on("--from=VAL", "Start level") {|v|
+    h[:from] = v.to_i
+  }
+  opt.on("--to=VAL", "End level") {|v|
+    h[:to] = v.to_i
+  }
+  opt.parse!(ARGV)
+
+  Nlmate.new(h).start
+end
