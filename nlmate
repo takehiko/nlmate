@@ -2,12 +2,11 @@
 # -*- coding: utf-8 -*-
 
 require "optparse"
-require "readline"
 require "fileutils"
 require "open3"
 require "timeout"
 
-Version = "0.0.1"
+Version = "0.0.2dev"
 
 class Nlmate
   #### constructor ####
@@ -23,13 +22,18 @@ class Nlmate
     @level = -1
     @goal = nil
     @line1 = @line2 = ""
+    @file_execute = "answer"
+    @command_compile = "gcc -o #{@file_execute} #{@file_execute}.c"
+    @command_execute = "./#{@file_execute}"
     @compile_error = false
     @result = ""
     @result_byte_max = 100
+    @readline_ready = nil
 
     create_dir
     setup_variation
     setup_question
+    setup_readline
   end
 
   #### public methods ####
@@ -99,28 +103,28 @@ class Nlmate
            "01101221"],
           ["000102121110202122"]
          ]
-    q1 = q0.map {|q_a|
+    @question_array = q0.map {|q_a|
       q_a.map {|line|
-        line.split(//u).map {|c|
-          c.ord - '0'.ord
+        line.scan(/../).map {|ij|
+           i = ij[0, 1].ord - '0'.ord
+           j = ij[1, 1].ord - '0'.ord
+           i, j = j, i  if @swap_ij
+           i += @offset_i
+           j += @offset_j
+           [i, j]
         }
       }
     }
+  end
 
-    @question_array = q1.map {|q_a|
-      q_a.map {|array|
-        array2 = array.dup
-        array3 = []
-        while array2.size >= 2
-          v1, v2 = array2.shift(2)
-          v1, v2 = v2, v1  if @swap_ij
-          v1 += @offset_i
-          v2 += @offset_j
-          array3 << [v1, v2]
-        end
-        array3
-      }
-    }
+  def setup_readline
+    begin
+      require "readline"
+      @readline_ready = true
+    rescue LoadError
+      @readline_ready = false
+      puts "Warning: GNU Readline is disabled."
+    end
   end
 
   def goal_to_str(array)
@@ -169,8 +173,10 @@ and
 respectively before hitting Enter key.
 
 EOS
-    Readline::HISTORY << line1_tutorial
-    Readline::HISTORY << line2_tutorial
+    if @readline_ready
+      Readline::HISTORY << line1_tutorial
+      Readline::HISTORY << line2_tutorial
+    end
   end
 
   def give_question
@@ -190,12 +196,18 @@ EOS
 
   def get_line(prompt)
     loop do
-      line = Readline.readline(prompt, true)
+      if @readline_ready
+        line = Readline.readline(prompt, true)
+      else
+        print prompt
+        $stdout.flush
+        line = $stdin.gets
+      end
       case line
       when /^\s*quit/i
         exit_game("Aborted.")
       when /^\s*for/
-        return line
+        return line.chomp
       else
         puts "Invalid statement."
       end
@@ -245,7 +257,7 @@ EOS
 
       message_out = ""
       message_err = ""
-      Open3.popen3("cc -o answer answer.c") do |stdin, stdout, stderr|
+      Open3.popen3(@command_compile) do |stdin, stdout, stderr|
         stdin.close
         message_out = stdout.read
         message_err = stderr.read
@@ -257,14 +269,14 @@ EOS
           print_hairline
         end
       end
-      unless test(?f, "answer")
+      unless test(?f, @file_execute)
         @compile_error = true
         return
       end
 
       @result = ""
       flag_timeout = false
-      Open3.popen3("./answer") do |stdin, stdout, stderr|
+      Open3.popen3(@command_execute) do |stdin, stdout, stderr|
         begin
           timeout(5) do
             stdin.close
