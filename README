@@ -1,3 +1,5 @@
+$ ruby nlmate -0
+
 [Tutorial]
 "nlmate" is a game for you to solve the nested loop mating problem,
 just like the Shogi mating problem (a.k.a. Tsume-Shogi).
@@ -38,3 +40,18 @@ int main(void)
 Output: (0,0),(0,1),(0,2),(1,0),(1,1),(1,2),(2,0),(2,1),(2,2),
 Goal:   (0,0),(0,1),(0,2),(1,0),(1,1),(1,2),(2,0),(2,1),(2,2),
 Correct!
+
+$ ruby nlmate --help
+
+Usage: nlmate [options]
+    -0, --tutorial                   Tutorial mode (Level 1 only)
+        --beginner                   Beginner mode (up to Level 3, default)
+        --kaikin                     Kaikin mode (up to Level 9)
+    -d, --dir=VAL                    Working directory
+    -v, --var=VAL                    Value for variation
+    -l, --level=VAL                  Fixed level
+        --from=VAL                   Start level
+        --to=VAL                     End level
+        --[no-]playtime              Print play time
+
+$ 

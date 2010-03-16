@@ -5,8 +5,9 @@ require "optparse"
 require "fileutils"
 require "open3"
 require "timeout"
+require "logger"
 
-Version = "0.0.2dev"
+Version = "0.0.2"
 
 class Nlmate
   #### constructor ####
@@ -18,7 +19,8 @@ class Nlmate
     @question_array = []
     @workdir = h[:workdir] || File.expand_path("~/.nlmate")
     @level_from = h[:from] || 1
-    @level_to = h[:to] || -1
+    @level_to = h[:to] || 3
+    @print_playtime = h[:playtime].nil? ? !(@level_from == 1 && @level_to == 1) : h[:playtime]
     @level = -1
     @goal = nil
     @line1 = @line2 = ""
@@ -29,11 +31,17 @@ class Nlmate
     @result = ""
     @result_byte_max = 100
     @readline_ready = nil
+    @log = nil
+    @stime_game = nil
+    @stime_answer = nil
+    @count_question = 0
+    @count_answer = 0
 
     create_dir
     setup_variation
     setup_question
     setup_readline
+    setup_logger
   end
 
   #### public methods ####
@@ -51,6 +59,7 @@ class Nlmate
       @level = lv
       play_game
     end
+    exit_game
   end
 
   #### private mathods ####
@@ -92,11 +101,16 @@ class Nlmate
            "000102111222"],
           ["000102101120",
            "021112202122"],
+          ["020100121110222120",
+           "001110222120",
+           "020100121122",
+           "020100111020",
+           "021211222120"],
           ["000111122223",
            "010210112/20"],
           ["000111122021",
-           "010210112122"],
-          ["0001111222",
+           "010210112122",
+           "0001111222",
            "0102101120"],
           ["00022022"],
           ["0002112022",
@@ -127,6 +141,13 @@ class Nlmate
     end
   end
 
+  def setup_logger
+    @log = Logger.new("#{@workdir}/nlmate.log")
+    @log.level = Logger::DEBUG
+    @log.info("start; ruby_platform=#{RUBY_PLATFORM}; ruby_version=#{RUBY_VERSION}; nlmate_version=#{Version}; variation=#{@variation}")
+    @stime_game = Time.now
+  end
+
   def goal_to_str(array)
     array.map {|i, j| "(#{i},#{j})"}.join(",") + ","
   end
@@ -145,8 +166,7 @@ class Nlmate
     line1_tutorial = "for (i = #{@question_array[0][0][0][0]}; i <= #{@question_array[0][0][-1][0]}; i++)"
     line2_tutorial = "for (j = #{@question_array[0][0][0][1]}; j <= #{@question_array[0][0][-1][1]}; j++)"
     if @swap_ij
-      line1_tutorial.gsub!(/i/, "j")
-      line2_tutorial.gsub!(/j/, "i")
+      line1_tutorial, line2_tutorial = line2_tutorial, line1_tutorial
     end
     if @use_smaller
       line1_tutorial.sub!(/<= (\d)/) {"< #{$1.to_i + 1}"}
@@ -190,6 +210,7 @@ EOS
       end
       @goal = goal_to_str(q2)
       @result_byte_max = [@goal.size * 2, 100].max
+      @count_question += 1
     end
     puts "Goal: #{@goal}"
   end
@@ -207,15 +228,21 @@ EOS
       when /^\s*quit/i
         exit_game("Aborted.")
       when /^\s*for/
-        return line.chomp
+        if line.index("for") == line.rindex("for")
+          return line.chomp
+        end
+        puts "Invalid statement (multiple \"for\")."
       else
-        puts "Invalid statement."
+        puts "Invalid statement (initial token is not \"for\")."
       end
     end
   end
 
-  def exit_game(message)
-    puts message
+  def exit_game(message = nil)
+    puts message  unless message.nil?
+    time_s = (Time.now - @stime_game).to_s.sub(/\.(\d{3}).+$/, ".\\1")
+    puts "Play time: #{time_s} sec."  if @print_playtime
+    @log.info("end; count_q=#{@count_question}; count_a=#{@count_answer}; time=#{time_s}")
     exit
   end
 
@@ -301,6 +328,18 @@ EOS
   end
 
   def correct_answer?
+    @count_answer += 1
+
+    if @compile_error
+      result_status = "err"
+    elsif @result != @goal
+      result_status = "ng"
+    else
+      result_status = "ok"
+    end
+    time_s = (@etime_answer - @stime_answer).to_s.sub(/\.(\d{3}).+$/, ".\\1")
+    @log.info("level=#{@level}; goal=#{@goal}; answer=#{@line1} #{@line2}; result=#{result_status}; time=#{time_s}")
+
     if @compile_error
       puts "Compile error occurred.... Let's start fresh!"
       puts
@@ -326,7 +365,9 @@ EOS
     print_tutorial  if @level == 1
     loop do
       give_question
+      @stime_answer = Time.now
       get_lines
+      @etime_answer = Time.now
       compile_and_execute
       break  if correct_answer?
     end
@@ -345,12 +386,16 @@ if __FILE__ == $0
   h = {}
   opt = OptionParser.new
   opt.on("-0", "--tutorial", "Tutorial mode (Level 1 only)") {
-    h[:random] = 0
+    h[:variation] = 0
     h[:from] = h[:to] = 1
   }
-  opt.on("-b", "--beginner", "Beginner mode (up to Level 3)") {
+  opt.on("--beginner", "Beginner mode (up to Level 3, default)") {
     h[:from] = 1
     h[:to] = 3
+  }
+  opt.on("--kaikin", "Kaikin mode (up to Level 9)") {
+    h[:from] = 1
+    h[:to] = 9
   }
   opt.on("-d VAL", "--dir=VAL", "Working directory") {|v|
     h[:workdir] = v
@@ -366,6 +411,9 @@ if __FILE__ == $0
   }
   opt.on("--to=VAL", "End level") {|v|
     h[:to] = v.to_i
+  }
+  opt.on("--[no-]playtime", "Print play time") {|v|
+    h[:playtime] = v
   }
   opt.parse!(ARGV)
 
