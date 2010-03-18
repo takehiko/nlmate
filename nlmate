@@ -6,173 +6,404 @@ require "fileutils"
 require "open3"
 require "timeout"
 require "logger"
+require "singleton"
 
-Version = "0.0.2"
+Version = "0.0.2a"
 
-class Nlmate
-  #### constructor ####
-  def initialize(h)
-    @variation = h[:variation] || rand(1024)
-    @offset_i = @offset_j = 0
-    @swap_ij = true
-    @use_smaller = false
-    @question_array = []
-    @workdir = h[:workdir] || File.expand_path("~/.nlmate")
-    @level_from = h[:from] || 1
-    @level_to = h[:to] || 3
-    @print_playtime = h[:playtime].nil? ? !(@level_from == 1 && @level_to == 1) : h[:playtime]
-    @level = -1
-    @goal = nil
-    @line1 = @line2 = ""
-    @file_execute = "answer"
-    @command_compile = "gcc -o #{@file_execute} #{@file_execute}.c"
-    @command_execute = "./#{@file_execute}"
-    @compile_error = false
-    @result = ""
-    @result_byte_max = 100
-    @readline_ready = nil
-    @log = nil
-    @stime_game = nil
-    @stime_answer = nil
-    @count_question = 0
-    @count_answer = 0
+module Nlmate
+  class GameMaster
+    #### constructor ####
+    def initialize(h)
+      @variation = h[:variation] || rand(1024)
+      @offset_i = @offset_j = 0
+      @swap_ij = true
+      @use_smaller = false
+      @workdir = h[:workdir] || File.expand_path("~/.nlmate")
+      @level_from = h[:from] || 1
+      @level_to = h[:to] || 3
+      @print_playtime = h[:playtime].nil? ? !(@level_from == 1 && @level_to == 1) : h[:playtime]
+      @level = -1
+      @question = nil
+      @goal = nil
+      @line1 = @line2 = ""
+      @file_execute = "answer"
+      @command_compile = "gcc -o #{@file_execute} #{@file_execute}.c"
+      @command_execute = "./#{@file_execute}"
+      @compile_error = false
+      @result = ""
+      @result_byte_max = 100
+      @readline_ready = nil
+      @log = nil
+      @stime_game = nil
+      @stime_answer = nil
+      @etime_answer = nil
+      @count_question = 0
+      @count_answer = 0
 
-    create_dir
-    setup_variation
-    setup_question
-    setup_readline
-    setup_logger
-  end
-
-  #### public methods ####
-  def start
-    print_question  if $DEBUG
-
-    @level_to = @question_array.size  if @level_to == -1
-    if @level_from <= 0 || @level_from > @question_array.size ||
-        @level_to <= 0 || @level_to > @question_array.size
-      puts "Invalid level."
-      return
+      create_dir
+      setup_readline
+      setup_logger
     end
 
-    @level_from.upto(@level_to) do |lv|
-      @level = lv
-      play_game
-    end
-    exit_game
-  end
+    #### public methods ####
+    def start
+      print_question  if $DEBUG
 
-  #### private mathods ####
-  private
-
-  def create_dir(lv = nil)
-    unless test(?d, @workdir)
-      FileUtils.mkdir(@workdir)
-    end
-    if lv
-      @dir_level = "#{@workdir}/#{lv}"
-      if test(?d, @dir_level)
-        FileUtils.rm_r(@dir_level)
+      max_level = QuestionManager.instance.max_level
+      @level_to = max_level  if @level_to == -1
+      if @level_from <= 0 || @level_from > max_level ||
+          @level_to <= 0 || @level_to > max_level ||
+          @level_from > @level_to
+        puts "Invalid level."
+        return
       end
-      FileUtils.mkdir(@dir_level)
+
+      @level_from.upto(@level_to) do |lv|
+        @level = lv
+        play_game
+      end
+      exit_game
+    end
+
+    #### private mathods ####
+    private
+
+    def create_dir(lv = nil)
+      unless test(?d, @workdir)
+        FileUtils.mkdir(@workdir)
+      end
+      if lv
+        @dir_level = "#{@workdir}/#{lv}"
+        if test(?d, @dir_level)
+          FileUtils.rm_r(@dir_level)
+        end
+        FileUtils.mkdir(@dir_level)
+      end
+    end
+
+    def setup_readline
+      begin
+        eval('require "readline"', TOPLEVEL_BINDING)
+        @readline_ready = true
+      rescue LoadError
+        @readline_ready = false
+        puts "Warning: GNU Readline is disabled."
+      end
+    end
+
+    def setup_logger
+      @log = Logger.new("#{@workdir}/nlmate.log")
+      @log.level = Logger::DEBUG
+      add_log_start
+      @stime_game = Time.now
+    end
+
+    def add_log_start
+      @log.info("start; ruby_platform=#{RUBY_PLATFORM}; ruby_version=#{RUBY_VERSION}; nlmate_version=#{Version}; variation=#{@variation}")
+    end
+
+    def add_log_answer(time, status)
+      @log.info("level=#{@level}; goal=#{@goal}; answer=#{@line1} #{@line2}; result=#{status}; time=#{time}")
+    end
+
+    def add_log_end(time)
+      @log.info("end; count_q=#{@count_question}; count_a=#{@count_answer}; time=#{time}")
+    end
+
+    def print_question
+      QuestionManager.instance.print_question
+    end
+
+    def print_tutorial
+      @question.print_tutorial(@readline_ready, @use_smaller)
+    end
+
+    def give_question
+      if @question.nil?
+        @question = Question.new(@level, @variation)
+        @goal = @question.goal
+        @result_byte_max = [@goal.size * 2, 100].max
+        @count_question += 1
+      end
+      print_tutorial  if @level == 1
+      puts "[Level #{@level}]"
+      puts "Goal: #{@goal}"
+    end
+
+    def get_line(prompt)
+      loop do
+        if @readline_ready
+          line = Readline.readline(prompt, true)
+        else
+          print prompt
+          $stdout.flush
+          line = $stdin.gets
+        end
+        case line
+        when /^\s*quit/i
+          exit_game("Aborted.")
+        when /^\s*for/
+          if line.index("for") == line.rindex("for")
+            return line.chomp
+          end
+          puts "Invalid statement (Do not write \"for\" more than once)."
+        else
+          puts "Invalid statement (Initial token should be \"for\")."
+        end
+      end
+    end
+
+    def time_to_s(t)
+      t.to_s.sub(/\.(\d{3}).+$/, ".\\1")
+    end
+
+    def exit_game(message = nil)
+      puts message  unless message.nil?
+
+      if @question
+        @etime_answer = Time.now
+        add_log_answer(time_to_s(@etime_answer - @stime_answer), "q")
+      end
+
+      time_s = time_to_s(Time.now - @stime_game)
+      puts "Play time: #{time_s} sec."  if @print_playtime
+      add_log_end(time_s)
+      exit
+    end
+
+    def get_lines
+      @line1 = get_line("Outer loop: ")
+      @line2 = get_line("Inner loop:   ")
+    end
+
+    def print_hairline
+      puts("=" * 40)
+    end
+
+    def compile_and_execute
+      @compile_error = false
+      @result = ""
+
+      create_dir(@level)
+      Dir.chdir(@dir_level) do
+        open("answer.c", "w") do |f_out|
+          src = <<EOS
+#include <stdio.h>
+
+int main(void)
+{
+  int i = 123, j = 456;
+
+  #{@line1}
+    #{@line2}
+      printf("(%d,%d),", i, j);
+
+  return 0;
+}
+EOS
+          f_out.print src
+          print_hairline
+          print src
+          print_hairline
+        end
+
+        message_out = ""
+        message_err = ""
+        Open3.popen3(@command_compile) do |stdin, stdout, stderr|
+          stdin.close
+          message_out = stdout.read
+          message_err = stderr.read
+        end
+        if !message_err.empty?
+          puts message_err
+          open("compile_stderr", "w") do |f_err|
+            f_err.print message_err
+            print_hairline
+          end
+        end
+        unless test(?f, @file_execute)
+          @compile_error = true
+          return
+        end
+
+        @result = ""
+        flag_timeout = false
+        Open3.popen3(@command_execute) do |stdin, stdout, stderr|
+          begin
+            timeout(5) do
+              stdin.close
+              @result = stdout.read(@result_byte_max) || ""
+            end
+          rescue Timeout::Error
+            stdout.flush
+            @result = stdout.read(@result_byte_max) || ""
+            flag_timeout = true
+          end
+        end
+        @result.chomp!
+        if @result.empty?
+          @result = "(no output)"
+        elsif @result.size >= @result_byte_max
+          @result = @result[0, @result_byte_max] + " ..."
+        end
+        if flag_timeout
+          @result += " (time out)"
+        end
+      end
+    end
+
+    def correct_answer?
+      @count_answer += 1
+
+      if @compile_error
+        result_status = "err"
+      elsif @result != @goal
+        result_status = "ng"
+      else
+        result_status = "ok"
+      end
+      add_log_answer(time_to_s(@etime_answer - @stime_answer), result_status)
+
+      if @compile_error
+        puts "Compile error occurred.... Let's start fresh!"
+        puts
+        return false
+      end
+
+      puts "Output: #{@result}"
+      puts "Goal:   #{@goal}"
+
+      if @result != @goal
+        puts "Wrong.... Try again!"
+        puts
+        return false
+      end
+
+      puts "Correct!"
+      puts
+      true
+    end
+
+    def play_game
+      loop do
+        @line1 = @line2 = ""
+        give_question
+        @stime_answer = Time.now
+        get_lines
+        @etime_answer = Time.now
+        compile_and_execute
+        break  if correct_answer?
+      end
+      @question = nil
     end
   end
 
-  def setup_variation
-    variation1, variation2 = @variation.divmod(128)
-    @swap_ij = (variation1 == 7)
-    @offset_i = @offset_j = 0
-    if variation2 == 127
-      @offset_i = 1
-      @offset_j = 0
-    elsif variation2 == 126
-      @offset_i = 0
-      @offset_j = 1
-    elsif variation2 >= 100
-      @offset_i = 1
-      @offset_j = 1
-    end
-  end
+  class QuestionManager
+    include Singleton
 
-  def setup_question
-    q0 = [
-          ["000102101112202122"],
-          ["001011202122",
-           "000102111222"],
-          ["000102101120",
-           "021112202122"],
-          ["020100121110222120",
-           "001110222120",
-           "020100121122",
-           "020100111020",
-           "021211222120"],
-          ["000111122223",
-           "010210112/20"],
-          ["000111122021",
-           "010210112122",
-           "0001111222",
-           "0102101120"],
-          ["00022022"],
-          ["0002112022",
-           "01101221"],
-          ["000102121110202122"]
-         ]
-    @question_array = q0.map {|q_a|
-      q_a.map {|line|
-        line.scan(/../).map {|ij|
-           i = ij[0, 1].ord - '0'.ord
-           j = ij[1, 1].ord - '0'.ord
-           i, j = j, i  if @swap_ij
-           i += @offset_i
-           j += @offset_j
-           [i, j]
+    #### constructor ####
+    def initialize
+      q0 = [
+            ["000102101112202122"],
+            ["001011202122",
+             "000102111222"],
+            ["000102101120",
+             "021112202122"],
+            ["020100121110222120",
+             "001110222120",
+             "020100121122",
+             "020100111020",
+             "021211222120"],
+            ["000111122223",
+             "010210112/20"],
+            ["000111122021",
+             "010210112122",
+             "0001111222",
+             "0102101120"],
+            ["00022022"],
+            ["0002112022",
+             "01101221"],
+            ["000102121110202122"]
+           ]
+      @question_array = q0.map {|q_a|
+        q_a.map {|line|
+          line.scan(/../).map {|ij|
+            i = ij[0, 1].ord - '0'.ord
+            j = ij[1, 1].ord - '0'.ord
+            [i, j]
+          }
         }
       }
-    }
-  end
-
-  def setup_readline
-    begin
-      require "readline"
-      @readline_ready = true
-    rescue LoadError
-      @readline_ready = false
-      puts "Warning: GNU Readline is disabled."
     end
-  end
 
-  def setup_logger
-    @log = Logger.new("#{@workdir}/nlmate.log")
-    @log.level = Logger::DEBUG
-    @log.info("start; ruby_platform=#{RUBY_PLATFORM}; ruby_version=#{RUBY_VERSION}; nlmate_version=#{Version}; variation=#{@variation}")
-    @stime_game = Time.now
-  end
+    #### public methods ####
+    def max_level
+      @question_array.size
+    end
 
-  def goal_to_str(array)
-    array.map {|i, j| "(#{i},#{j})"}.join(",") + ","
-  end
+    def fetch(level)
+      raise  if level <= 0 || level > max_level
+      q1 = @question_array[level - 1]
+      if q1.size == 1
+        q1.first
+      else
+        q1[rand(q1.size)]
+      end
+    end
 
-  def print_question
-    require "pp"
-    PP.pp @question_array
-    PP.pp @question_array.map {|q_a|
-      q_a.map {|array|
-        goal_to_str(array)
+    def print_question
+      require "pp"
+      PP.pp @question_array
+      PP.pp @question_array.map {|q_a|
+        q_a.map {|array|
+          Question.goal_to_str(array)
+        }
       }
-    }
+    end
   end
 
-  def print_tutorial
-    line1_tutorial = "for (i = #{@question_array[0][0][0][0]}; i <= #{@question_array[0][0][-1][0]}; i++)"
-    line2_tutorial = "for (j = #{@question_array[0][0][0][1]}; j <= #{@question_array[0][0][-1][1]}; j++)"
-    if @swap_ij
-      line1_tutorial, line2_tutorial = line2_tutorial, line1_tutorial
+  class Question
+    #### class methods ####
+    def self.goal_to_str(array)
+      array.map {|i, j| "(#{i},#{j})"}.join(",") + ","
     end
-    if @use_smaller
-      line1_tutorial.sub!(/<= (\d)/) {"< #{$1.to_i + 1}"}
-      line2_tutorial.sub!(/<= (\d)/) {"< #{$1.to_i + 1}"}
+
+    #### constructor ####
+    def initialize(level = 1, variation = 0)
+      @level = level
+      @variation = variation
+
+      setup_variation
+
+      @q = QuestionManager.instance.fetch(level)
+      @q.map! {|ij|
+        i, j = ij
+        i, j = j, i  if @swap_ij
+        i += @offset_i
+        j += @offset_j
+        [i, j]
+      }
+      @goal = goal_to_str
     end
-    puts <<EOS
+    attr_reader :level, :variation, :goal
+
+    #### public methods ####
+    def goal_to_str
+      self.class.goal_to_str(@q)
+    end
+
+    def print_tutorial(readline_ready = false, use_smaller = false)
+      puts "Warning: The answer may not be correct."  if @level != 1
+      line1 = "for (i = #{@q[0][0]}; i <= #{@q[-1][0]}; i++)"
+      line2 = "for (j = #{@q[0][1]}; j <= #{@q[-1][1]}; j++)"
+      if @swap_ij
+        line1, line2 = line2, line1
+      end
+      if use_smaller
+        line1.sub!(/<= (\d)/) {"< #{$1.to_i + 1}"}
+        line2.sub!(/<= (\d)/) {"< #{$1.to_i + 1}"}
+      end
+      puts <<EOS
 [Tutorial]
 "nlmate" is a game for you to solve the nested loop mating problem,
 just like the Shogi mating problem (a.k.a. Tsume-Shogi).
@@ -187,189 +418,35 @@ The input which begins with the word other than "for" is not
 allowed, except that you may "quit" to stop playing the game.
 
 All you have to do for the first task is punch in
-"#{line1_tutorial}"
+"#{line1}"
 and
-"#{line2_tutorial}"
+"#{line2}"
 respectively before hitting Enter key.
 
 EOS
-    if @readline_ready
-      Readline::HISTORY << line1_tutorial
-      Readline::HISTORY << line2_tutorial
-    end
-  end
-
-  def give_question
-    puts "[Level #{@level}]"
-    if @goal.nil?
-      q1 = @question_array[@level - 1]
-      if q1.size == 1
-        q2 = q1.first
-      else
-        q2 = q1[rand(q1.size)]
-      end
-      @goal = goal_to_str(q2)
-      @result_byte_max = [@goal.size * 2, 100].max
-      @count_question += 1
-    end
-    puts "Goal: #{@goal}"
-  end
-
-  def get_line(prompt)
-    loop do
-      if @readline_ready
-        line = Readline.readline(prompt, true)
-      else
-        print prompt
-        $stdout.flush
-        line = $stdin.gets
-      end
-      case line
-      when /^\s*quit/i
-        exit_game("Aborted.")
-      when /^\s*for/
-        if line.index("for") == line.rindex("for")
-          return line.chomp
-        end
-        puts "Invalid statement (multiple \"for\")."
-      else
-        puts "Invalid statement (initial token is not \"for\")."
+      if readline_ready
+        Readline::HISTORY << line1
+        Readline::HISTORY << line2
       end
     end
-  end
 
-  def exit_game(message = nil)
-    puts message  unless message.nil?
-    time_s = (Time.now - @stime_game).to_s.sub(/\.(\d{3}).+$/, ".\\1")
-    puts "Play time: #{time_s} sec."  if @print_playtime
-    @log.info("end; count_q=#{@count_question}; count_a=#{@count_answer}; time=#{time_s}")
-    exit
-  end
+    #### private mathods ####
+    private
 
-  def get_lines
-    @line1 = get_line("Outer loop: ")
-    @line2 = get_line("Inner loop:   ")
-  end
-
-  def print_hairline
-    puts("=" * 40)
-  end
-
-  def compile_and_execute
-    @compile_error = false
-    @result = ""
-
-    create_dir(@level)
-    Dir.chdir(@dir_level) do
-      open("answer.c", "w") do |f_out|
-        src = <<EOS
-#include <stdio.h>
-
-int main(void)
-{
-  int i = 123, j = 456;
-
-  #{@line1}
-    #{@line2}
-      printf("(%d,%d),", i, j);
-
-  return 0;
-}
-EOS
-        f_out.print src
-        print_hairline
-        print src
-        print_hairline
+    def setup_variation
+      variation1, variation2 = @variation.divmod(128)
+      @swap_ij = (variation1 == 7)
+      @offset_i = @offset_j = 0
+      if variation2 == 127
+        @offset_i = 1
+        @offset_j = 0
+      elsif variation2 == 126
+        @offset_i = 0
+        @offset_j = 1
+      elsif variation2 >= 100
+        @offset_i = 1
+        @offset_j = 1
       end
-
-      message_out = ""
-      message_err = ""
-      Open3.popen3(@command_compile) do |stdin, stdout, stderr|
-        stdin.close
-        message_out = stdout.read
-        message_err = stderr.read
-      end
-      if !message_err.empty?
-        puts message_err
-        open("compile_stderr", "w") do |f_err|
-          f_err.print message_err
-          print_hairline
-        end
-      end
-      unless test(?f, @file_execute)
-        @compile_error = true
-        return
-      end
-
-      @result = ""
-      flag_timeout = false
-      Open3.popen3(@command_execute) do |stdin, stdout, stderr|
-        begin
-          timeout(5) do
-            stdin.close
-            @result = stdout.read(@result_byte_max) || ""
-          end
-        rescue Timeout::Error
-          stdout.flush
-          @result = stdout.read(@result_byte_max) || ""
-          flag_timeout = true
-        end
-      end
-      @result.chomp!
-      if @result.empty?
-        @result = "(no output)"
-      elsif @result.size >= @result_byte_max
-        @result = @result[0, @result_byte_max] + " ..."
-      end
-      if flag_timeout
-        @result += " (time out)"
-      end
-    end
-  end
-
-  def correct_answer?
-    @count_answer += 1
-
-    if @compile_error
-      result_status = "err"
-    elsif @result != @goal
-      result_status = "ng"
-    else
-      result_status = "ok"
-    end
-    time_s = (@etime_answer - @stime_answer).to_s.sub(/\.(\d{3}).+$/, ".\\1")
-    @log.info("level=#{@level}; goal=#{@goal}; answer=#{@line1} #{@line2}; result=#{result_status}; time=#{time_s}")
-
-    if @compile_error
-      puts "Compile error occurred.... Let's start fresh!"
-      puts
-      return false
-    end
-
-    puts "Output: #{@result}"
-    puts "Goal:   #{@goal}"
-
-    if @result != @goal
-      puts "Wrong.... Try again!"
-      puts
-      return false
-    end
-
-    puts "Correct!"
-    puts
-    true
-  end
-
-  def play_game
-    @goal = nil
-    print_tutorial  if @level == 1
-    loop do
-      give_question
-      @stime_answer = Time.now
-      get_lines
-      @etime_answer = Time.now
-      compile_and_execute
-      break  if correct_answer?
     end
   end
 end
@@ -417,5 +494,5 @@ if __FILE__ == $0
   }
   opt.parse!(ARGV)
 
-  Nlmate.new(h).start
+  Nlmate::GameMaster.new(h).start
 end
