@@ -8,7 +8,7 @@ require "timeout"
 require "logger"
 require "singleton"
 
-Version = "0.0.2a"
+Version = "0.0.2b"
 
 module Nlmate
   class GameMaster
@@ -26,19 +26,14 @@ module Nlmate
       @question = nil
       @goal = nil
       @line1 = @line2 = ""
-      @file_execute = "answer"
-      @command_compile = "gcc -o #{@file_execute} #{@file_execute}.c"
-      @command_execute = "./#{@file_execute}"
-      @compile_error = false
-      @result = ""
-      @result_byte_max = 100
       @readline_ready = nil
       @log = nil
-      @stime_game = nil
-      @stime_answer = nil
-      @etime_answer = nil
+      @time_game = nil
+      @time_answer = nil
       @count_question = 0
       @count_answer = 0
+      @inspector = nil
+      @tutorial_done = false
 
       create_dir
       setup_readline
@@ -95,7 +90,8 @@ module Nlmate
       @log = Logger.new("#{@workdir}/nlmate.log")
       @log.level = Logger::DEBUG
       add_log_start
-      @stime_game = Time.now
+      @time_game = TimeManager.new
+      @time_game.start_clock
     end
 
     def add_log_start
@@ -122,10 +118,12 @@ module Nlmate
       if @question.nil?
         @question = Question.new(@level, @variation)
         @goal = @question.goal
-        @result_byte_max = [@goal.size * 2, 100].max
         @count_question += 1
       end
-      print_tutorial  if @level == 1
+      if @level == 1 && !@tutorial_done
+        print_tutorial
+        @tutorial_done = true
+      end
       puts "[Level #{@level}]"
       puts "Goal: #{@goal}"
     end
@@ -153,19 +151,16 @@ module Nlmate
       end
     end
 
-    def time_to_s(t)
-      t.to_s.sub(/\.(\d{3}).+$/, ".\\1")
-    end
-
     def exit_game(message = nil)
       puts message  unless message.nil?
 
       if @question
-        @etime_answer = Time.now
-        add_log_answer(time_to_s(@etime_answer - @stime_answer), "q")
+        @time_answer.end_clock
+        add_log_answer(@time_answer.to_s, Inspector::STATUS_QUIT)
       end
 
-      time_s = time_to_s(Time.now - @stime_game)
+      @time_game.end_clock
+      time_s = @time_game.to_s
       puts "Play time: #{time_s} sec."  if @print_playtime
       add_log_end(time_s)
       exit
@@ -180,100 +175,38 @@ module Nlmate
       puts("=" * 40)
     end
 
-    def compile_and_execute
-      @compile_error = false
-      @result = ""
-
-      create_dir(@level)
-      Dir.chdir(@dir_level) do
-        open("answer.c", "w") do |f_out|
-          src = <<EOS
-#include <stdio.h>
-
-int main(void)
-{
-  int i = 123, j = 456;
-
-  #{@line1}
-    #{@line2}
-      printf("(%d,%d),", i, j);
-
-  return 0;
-}
-EOS
-          f_out.print src
-          print_hairline
-          print src
-          print_hairline
-        end
-
-        message_out = ""
-        message_err = ""
-        Open3.popen3(@command_compile) do |stdin, stdout, stderr|
-          stdin.close
-          message_out = stdout.read
-          message_err = stderr.read
-        end
-        if !message_err.empty?
-          puts message_err
-          open("compile_stderr", "w") do |f_err|
-            f_err.print message_err
-            print_hairline
-          end
-        end
-        unless test(?f, @file_execute)
-          @compile_error = true
-          return
-        end
-
-        @result = ""
-        flag_timeout = false
-        Open3.popen3(@command_execute) do |stdin, stdout, stderr|
-          begin
-            timeout(5) do
-              stdin.close
-              @result = stdout.read(@result_byte_max) || ""
-            end
-          rescue Timeout::Error
-            stdout.flush
-            @result = stdout.read(@result_byte_max) || ""
-            flag_timeout = true
-          end
-        end
-        @result.chomp!
-        if @result.empty?
-          @result = "(no output)"
-        elsif @result.size >= @result_byte_max
-          @result = @result[0, @result_byte_max] + " ..."
-        end
-        if flag_timeout
-          @result += " (time out)"
-        end
+    def play_game
+      loop do
+        @line1 = @line2 = ""
+        give_question
+        @time_answer = TimeManager.new
+        @time_answer.start_clock
+        get_lines
+        @count_answer += 1
+        @time_answer.end_clock
+        @inspector = Inspector.new(:workdir => @workdir, :level => @level,
+                                   :goal => @goal, :quiet => false,
+                                   :line1 => @line1, :line2 => @line2)
+        @inspector.compile_and_execute
+        print_result
+        break  if @inspector.correct?
       end
+      @question = nil
     end
 
-    def correct_answer?
-      @count_answer += 1
+    def print_result
+      add_log_answer(@time_answer.to_s, @inspector.result_status)
 
-      if @compile_error
-        result_status = "err"
-      elsif @result != @goal
-        result_status = "ng"
-      else
-        result_status = "ok"
-      end
-      add_log_answer(time_to_s(@etime_answer - @stime_answer), result_status)
-
-      if @compile_error
+      if @inspector.compile_error?
         puts "Compile error occurred.... Let's start fresh!"
         puts
         return false
       end
 
-      puts "Output: #{@result}"
+      puts "Output: #{@inspector.result}"
       puts "Goal:   #{@goal}"
 
-      if @result != @goal
+      if !@inspector.correct?
         puts "Wrong.... Try again!"
         puts
         return false
@@ -282,19 +215,6 @@ EOS
       puts "Correct!"
       puts
       true
-    end
-
-    def play_game
-      loop do
-        @line1 = @line2 = ""
-        give_question
-        @stime_answer = Time.now
-        get_lines
-        @etime_answer = Time.now
-        compile_and_execute
-        break  if correct_answer?
-      end
-      @question = nil
     end
   end
 
@@ -447,6 +367,172 @@ EOS
         @offset_i = 1
         @offset_j = 1
       end
+    end
+  end
+
+  class Inspector
+    #### constants ####
+    STATUS_ERROR = "err"
+    STATUS_OK = "ok"
+    STATUS_NG = "ng"
+    STATUS_QUIT = "q"
+
+    #### constructor ####
+    def initialize(h)
+      @result = ""
+      @result_status = ""
+      @compile_error = nil
+      @workdir = h[:workdir]
+      @level = h[:level]
+      @goal = h[:goal]
+      @line1 = h[:line1]
+      @line2 = h[:line2]
+      @quiet = h[:quiet]
+      @file_execute = "answer"
+      @command_compile = "gcc -Wall -o #{@file_execute} #{@file_execute}.c"
+      @command_execute = "./#{@file_execute}"
+      @file_compile_error = "compile_stderr"
+      @result_byte_max = [@goal.size * 2, 100].max
+      @message = ""
+    end
+    attr_reader :result, :result_status, :message
+
+    #### public methods ####
+    def compile_and_execute
+      create_dir
+      compile
+      execute
+      check_answer
+    end
+
+    def compile_error?
+      @result_status == STATUS_ERROR
+    end
+
+    def correct?
+      @result_status == STATUS_OK
+    end
+
+    #### private mathods ####
+    private
+
+    def create_dir
+      @dir_level = "#{@workdir}/#{@level}"
+      if test(?d, @dir_level)
+        FileUtils.rm_r(@dir_level)
+      end
+      FileUtils.mkdir_p(@dir_level)
+    end
+
+    def print_hairline
+      puts("=" * 40)
+    end
+
+    def compile
+      @compile_error = false
+
+      Dir.chdir(@dir_level) do
+        open("#{@file_execute}.c", "w") do |f_out|
+          src = <<EOS
+#include <stdio.h>
+
+int main(void)
+{
+  int i = 123, j = 456;
+
+  #{@line1}
+    #{@line2}
+      printf("(%d,%d),", i, j);
+
+  return 0;
+}
+EOS
+          f_out.print src
+          print_hairline
+          print src
+          print_hairline
+        end
+
+        message_out = ""
+        message_err = ""
+        Open3.popen3(@command_compile) do |stdin, stdout, stderr|
+          stdin.close
+          message_out = stdout.read
+          message_err = stderr.read
+        end
+        if !message_err.empty?
+          puts message_err  unless @quiet
+          @message += message_err
+          open(@file_compile_error, "w") do |f_err|
+            f_err.print message_err
+            print_hairline  unless @quiet
+          end
+        end
+
+        unless test(?f, @file_execute)
+          @compile_error = true
+        end
+      end
+    end
+
+    def execute
+      return  if @compile_error
+
+      flag_timeout = false
+      Dir.chdir(@dir_level) do
+        Open3.popen3(@command_execute) do |stdin, stdout, stderr|
+          begin
+            timeout(5) do
+              stdin.close
+              @result = stdout.read(@result_byte_max) || ""
+            end
+          rescue Timeout::Error
+            flag_timeout = true
+          end
+        end
+
+        @result.chomp!
+        if flag_timeout
+          @result = "(time out)"
+        elsif @result.empty?
+          @result = "(no output)"
+        elsif @result.size >= @result_byte_max
+          @result = @result[0, @result_byte_max] + " ..."
+        end
+      end
+    end
+
+    def check_answer
+      if @compile_error
+        @result_status = STATUS_ERROR
+      elsif @result != @goal
+        @result_status = STATUS_NG
+      else
+        @result_status = STATUS_OK
+      end
+    end
+  end
+
+  class TimeManager
+    #### constructor ####
+    def initialize
+      @start = nil
+      @end = nil
+    end
+
+    #### public methods ####
+    def start_clock
+      @start = Time.now
+    end
+
+    def end_clock
+      @end = Time.now
+    end
+
+    def to_s
+      return "(not yet)"  if @start.nil?
+      end_clock  if @end.nil?
+      (@end - @start).to_s.sub(/\.(\d{3}).+$/, ".\\1")
     end
   end
 end
