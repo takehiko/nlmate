@@ -8,7 +8,7 @@ require "timeout"
 require "logger"
 require "singleton"
 
-Version = "0.0.2b"
+Version = "0.0.2c"
 
 module Nlmate
   class GameMaster
@@ -171,10 +171,6 @@ module Nlmate
       @line2 = get_line("Inner loop:   ")
     end
 
-    def print_hairline
-      puts("=" * 40)
-    end
-
     def play_game
       loop do
         @line1 = @line2 = ""
@@ -326,22 +322,23 @@ module Nlmate
       puts <<EOS
 [Tutorial]
 "nlmate" is a game for you to solve the nested loop mating problem,
-just like the Shogi mating problem (a.k.a. Tsume-Shogi).
+called after the Shogi mating problem (a.k.a. Tsume-Shogi).
 
-Your task is typing in two "for statements" which work as 
-the nested loop to conform to the goal sequence. After the entry, 
-the fixed codes surround and enclose your instructions and the 
-source file is automatically compiled to decide if the output is 
+Your task is typing in two "for statements" which work as
+the nested loop to conform to the goal sequence. After the entry,
+the fixed codes in C surround and enclose your instructions and the
+source file is automatically compiled to decide if the output is
 the same as the goal.
 
-The input which begins with the word other than "for" is not 
-allowed, except that you may "quit" to stop playing the game.
+The input which begins with the word other than "for" is not
+allowed, except that you may type "quit" to stop playing the game.
 
 All you have to do for the first task is punch in
 "#{line1}"
 and
 "#{line2}"
-respectively before hitting Enter key.
+in series. Don\'t forget to hit the Enter key to let me know 
+your answer!
 
 EOS
       if readline_ready
